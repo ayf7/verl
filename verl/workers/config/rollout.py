@@ -149,6 +149,7 @@ class RolloutConfig(BaseConfig):
     do_sample: bool = True
     n: int = 1
     repetition_penalty: float = 1.0
+    stop_strings: Optional[str] = None  # comma-separated stop strings (e.g., "</answer>")
 
     # Early termination threshold for multi-turn rollout in sglang.
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.

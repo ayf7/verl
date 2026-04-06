@@ -286,7 +286,7 @@ class vLLMHttpServer:
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)
-        compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
+        compilation_config.setdefault("cudagraph_mode", "NONE")
 
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
         dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1
@@ -546,6 +546,11 @@ class vLLMHttpServer:
         )
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+        # Add stop strings from config if specified
+        stop_strings_cfg = self.config.get("stop_strings", None)
+        if stop_strings_cfg:
+            sampling_params.setdefault("stop", stop_strings_cfg.split(","))
+            sampling_params.setdefault("include_stop_str_in_output", True)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}

@@ -409,9 +409,15 @@ class RayPPOTrainer:
             if len(v) == n:
                 base_data[k] = v
 
+        def _convert(val):
+            """Convert numpy types to Python natives for JSON serialization."""
+            if hasattr(val, 'item'):
+                return val.item()
+            return val
+
         lines = []
         for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
+            entry = {k: _convert(v[i]) for k, v in base_data.items()}
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
@@ -1576,6 +1582,14 @@ class RayPPOTrainer:
                 )
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # accuracy metrics from reward extra info
+                if "correct" in batch.non_tensor_batch and "has_answer" in batch.non_tensor_batch:
+                    correct_arr = np.asarray(batch.non_tensor_batch["correct"], dtype=bool)
+                    has_answer_arr = np.asarray(batch.non_tensor_batch["has_answer"], dtype=bool)
+                    n = len(correct_arr)
+                    metrics["accuracy/percent_correct"] = float(np.sum(correct_arr) / n * 100)
+                    metrics["accuracy/percent_incorrect"] = float(np.sum(has_answer_arr & ~correct_arr) / n * 100)
+                    metrics["accuracy/percent_malformed"] = float(np.sum(~has_answer_arr) / n * 100)
                 # GDPO per-component reward metrics
                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
                 if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
