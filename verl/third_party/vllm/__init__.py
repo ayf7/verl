@@ -31,6 +31,7 @@ package_name = "vllm"
 package_version = get_version(package_name)
 vllm_version = None
 VLLM_SLEEP_LEVEL = 1
+is_local_dev_vllm = package_version is not None and package_version.startswith("0.1.dev")
 
 if package_version is None:
     if not is_sglang_available():
@@ -41,6 +42,13 @@ if package_version is None:
 elif is_npu_available:
     # sleep_mode=2 is not supported on vllm-ascend for now, will remove this restriction when this ability is ready.
     VLLM_SLEEP_LEVEL = 1
+    from vllm import LLM
+    from vllm.distributed import parallel_state
+elif is_local_dev_vllm:
+    # SplitReason uses an editable source build of vLLM whose package
+    # metadata is 0.1.dev... even though the checked-out API matches a
+    # supported modern vLLM. Gate on importability for this local fork.
+    vllm_version = package_version
     from vllm import LLM
     from vllm.distributed import parallel_state
 elif vs.parse(package_version) >= vs.parse("0.7.0"):

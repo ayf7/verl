@@ -69,7 +69,10 @@ if _VLLM_VERSION > version.parse("0.11.0"):
     if get_encoding is not None and os.getenv("VERL_USE_GPT_OSS", "0") == "1":
         get_encoding()
 else:
-    from vllm.utils import FlexibleArgumentParser
+    try:
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+    except ImportError:
+        from vllm.utils import FlexibleArgumentParser
 
 
 logger = logging.getLogger(__file__)
@@ -608,13 +611,22 @@ class vLLMHttpServer:
         if hasattr(final_res.outputs[0], "num_preempted"):
             num_preempted = final_res.outputs[0].num_preempted
 
+        extra_fields = {
+            "global_steps": self.global_steps,
+            "vllm_finish_reason": finish_reason,
+            "vllm_stop_reason": final_res.outputs[0].stop_reason,
+        }
+        prompt_probe_logprobs = getattr(final_res, "prompt_probe_logprobs", None)
+        if prompt_probe_logprobs is not None:
+            extra_fields["prompt_probe_logprobs"] = prompt_probe_logprobs
+
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
-            extra_fields={"global_steps": self.global_steps},
+            extra_fields=extra_fields,
         )
 
     async def wake_up(self):

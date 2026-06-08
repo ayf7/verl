@@ -447,6 +447,22 @@ class RayPPOTrainer:
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
+            if "splitreason" in batch.non_tensor_batch:
+                reward_extra_infos_to_dump["splitreason"] = batch.non_tensor_batch[
+                    "splitreason"
+                ].tolist()
+            if "response_mask" in batch.batch:
+                response_mask = batch.batch["response_mask"]
+                response_attention = batch.batch["attention_mask"][
+                    :, batch.batch["prompts"].shape[1] :
+                ]
+                response_lengths = response_attention.sum(-1).cpu().tolist()
+                trained_tokens = response_mask.sum(-1).cpu().tolist()
+                reward_extra_infos_to_dump["response_tokens"] = response_lengths
+                reward_extra_infos_to_dump["policy_trained_tokens"] = trained_tokens
+                reward_extra_infos_to_dump["large_masked_tokens"] = (
+                    response_attention - response_mask
+                ).sum(-1).cpu().tolist()
 
             self._dump_generations(
                 inputs=inputs,

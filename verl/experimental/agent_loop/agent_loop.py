@@ -141,6 +141,7 @@ class AsyncLLMServerManager:
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        priority: int = 0,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -160,6 +161,7 @@ class AsyncLLMServerManager:
                 sampling_params=sampling_params,
                 image_data=image_data,
                 video_data=video_data,
+                priority=priority,
             )
             return output
         finally:
@@ -168,6 +170,8 @@ class AsyncLLMServerManager:
 
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
+
+    model_config = ConfigDict(extra="allow")
 
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
