@@ -437,13 +437,35 @@ class RayPPOTrainer:
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+            # SplitReason: keep special tokens in the OUTPUT decode so the <bigmodel>/</bigmodel>
+            # offload markers (special ids 151669/151670) stay visible in the dumped transcript --
+            # skip_special_tokens=True erases them, hiding which spans the large model authored.
+            # Then trim the trailing pad/eos run (pad==eos==151643) so the visible tail isn't a wall
+            # of <|endoftext|>. Prompts stay clean (skip_special_tokens=True above).
+            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=False)
+            _eos = self.tokenizer.eos_token
+            if _eos:
+                outputs = [o.split(_eos)[0] for o in outputs]
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
-            reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            # Source the reward columns from the LIVE batch.non_tensor_batch, not the stale
+            # reward_extra_infos_dict. extract_reward's extras are merged into the batch
+            # (recipe/dapo/dapo_ray_trainer.py:226-228) and then reordered as a unit with the
+            # responses/uid by filter_groups, DataProto.concat, the [:traj_bsz] slice, and
+            # _balance_batch -- whereas reward_extra_infos_dict is captured pre-balance and never
+            # reordered. Pairing the stale dict with the reordered batch made the dumped reward
+            # columns (score/acc/offload_ratio/...) a row-permutation of the response columns next
+            # to them. The training signal was always fine (the reward travels inside the batch),
+            # but the dump was misleading. Reading from batch.non_tensor_batch keeps every dumped
+            # column in the same order. (SplitReason: rollout-dump-reward-misalignment.)
+            reward_extra_infos_to_dump = {
+                key: batch.non_tensor_batch[key].tolist()
+                for key in reward_extra_infos_dict
+                if key in batch.non_tensor_batch
+            }
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
+                reward_extra_infos_to_dump.setdefault(
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
@@ -584,7 +606,16 @@ class RayPPOTrainer:
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            # SplitReason: keep <bigmodel>/</bigmodel> markers visible in dumped val transcripts
+            # (skip_special_tokens=False), then trim the trailing pad/eos run. See the matching note
+            # in _log_rollout_data above.
+            _eos = self.tokenizer.eos_token
+            output_texts = [
+                self.tokenizer.decode(ids, skip_special_tokens=False).split(_eos)[0]
+                if _eos
+                else self.tokenizer.decode(ids, skip_special_tokens=False)
+                for ids in output_ids
+            ]
             sample_outputs.extend(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)
