@@ -413,6 +413,22 @@ class vLLMHttpServer:
 
         server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
 
+        # SplitReason sleep-race fix (async output copy): force --no-async-scheduling on the rollout
+        # engine. With vLLM v1 async scheduling (default on), a daemon thread "WorkerAsyncOutputCopy"
+        # copies model output device->host on a SEPARATE cuda stream, gated by an async_copy_ready_event
+        # (gpu_model_runner.py: AsyncGPUModelRunnerOutput). verl sleeps the engine for the rollout->train
+        # handoff (CuMemAllocator discards the KV cache); if a copy is still in flight its event
+        # synchronize() touches freed memory -> "CUDA error: an illegal memory access" and EngineCore
+        # dies. It is a per-sleep race (one run survived 8 sleeps, another died on the 6th), so across a
+        # 400-step run it is near-certain. async_scheduling can only be turned OFF via the negation flag
+        # (build_cli_args_from_config drops bool False), so inject it here. Removes the racy thread
+        # entirely (the exact path vLLM takes when incompatibilities force async_scheduling off); the
+        # synchronous output copy costs the 1.7B controller nothing measurable. The gpu_worker.py
+        # torch.cuda.synchronize() barrier does NOT cover this -- it syncs only the default stream, not
+        # the async output copy stream. Orthogonal to enforce_eager (which fixes the inductor crash).
+        if "--no-async-scheduling" not in server_args and "--async-scheduling" not in server_args:
+            server_args.append("--no-async-scheduling")
+
         if self.replica_rank == 0:
             pprint(server_args)
 
@@ -648,6 +664,42 @@ class vLLMHttpServer:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
+            # SplitReason fix: the HYBRID sleep below goes straight to the worker
+            # (collective_rpc("sleep") -> Worker.sleep -> CuMemAllocator unmaps ALL VA)
+            # and never routes through EngineCore.sleep, so the EngineCore scheduler is
+            # never asked to abort its in-flight requests. Standard verl drains every
+            # rollout before sleeping, but the SplitReason cooperative orchestrator
+            # abandons server-side requests mid-turn (ServerManagerChunkEngine.abort is a
+            # deliberate no-op -- the client never learns the per-turn uuid4 id). Those
+            # orphans stay "running" in the scheduler; the next EngineCore.step() (gated
+            # only on has_requests()) schedules them and launches a decode forward against
+            # the just-unmapped VA -> "CUDA driver error: invalid argument".
+            #
+            # Abort the orphans here, before the worker frees memory. Use the NON-pausing
+            # scheduler abort (engine_core.abort_requests_async -> ABORT on the engine input
+            # queue -> scheduler.finish_requests(FINISHED_ABORTED)), NOT pause_generation/
+            # abort_all_requests: a pause would set PAUSED_NEW, and the HYBRID wake path
+            # (collective_rpc("wake_up") -> Worker.wake_up) never calls resume_scheduler, so
+            # the engine would wedge after the first sleep. The ABORT and the sleep UTILITY
+            # share the EngineCore input queue, which is drained FIFO in full before the next
+            # step(), so the scheduler is empty by the time the worker frees memory.
+            request_ids = list(self.engine.output_processor.request_states.keys())
+            if request_ids:
+                # Mirror vLLM's own AsyncLLM.abort (async_llm.py:713-722): resolve the
+                # frontend bookkeeping FIRST (abort_requests returns the fully-resolved
+                # internal ids, expanding any parent->child requests), then hand exactly
+                # those ids to the EngineCore scheduler abort. request_states.keys() are
+                # internal ids, so internal=True. The verified FIFO ordering (ABORT and the
+                # sleep UTILITY share the EngineCore input_socket/input_queue, drained in
+                # full before the next step()) guarantees scheduler.running is emptied
+                # before collective_rpc("sleep") unmaps the worker's VA.
+                all_request_ids = self.engine.output_processor.abort_requests(request_ids, internal=True)
+                await self.engine.engine_core.abort_requests_async(all_request_ids)
+                logger.info(
+                    "SplitReason: aborted %d orphaned in-flight request(s) before HYBRID sleep",
+                    len(all_request_ids),
+                )
+
             # Don't use engine.sleep(level=2) here
             # lora only update adapter weights, so set sleep level to 1
             if self.lora_as_adapter:
